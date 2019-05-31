@@ -1,0 +1,2599 @@
+---
+title: "KIMOVE"
+author: "Jonathan Tjerkaski"
+date: "24 April 2019"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 3
+---
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+```
+
+
+# Aim
+
+The aim of this assignment is to investigate of cortical thickness can be used  
+to succesfully predict the correct diagnosis of patients with movement disorders. 
+
+# Packages
+
+##Install packages
+
+This step only has to be done once!
+
+```{r install_packages, eval = FALSE}
+
+install.packages("tidymodels")
+install.packages("tidyverse")
+install.packages("knitr")
+install.packages("AppliedPredictiveModeling")
+install.packages("caret")
+install.packages("MLmetrics")
+install.packages("ggfortify")
+install.packages("kableExtra")
+install.packages("summarytools")
+install.packages("readxl")
+install.packages("corrr")
+install.packages("RColorBrewer")
+install.packages("corrplot")
+#This may be required for the Support Vector Machines analysis
+install.packages("kernlab")
+install.packages('modelgrid')
+install.packages('e1071')
+install.packages('MASS')
+install.packages('descr')
+
+```
+
+##Load Packages
+
+
+```{r packages}
+
+library(tidymodels)
+library(tidyverse)
+library(knitr)
+library(AppliedPredictiveModeling)
+library(caret)
+library(MLmetrics)
+library(ggfortify)
+library(kableExtra)
+library(summarytools)
+library(corrplot)
+library(readxl)
+library(corrr)
+library(modelgrid)
+library(e1071)
+library(MASS) 
+library(descr) 
+
+
+options(knitr.kable.NA = '')
+
+
+```
+
+#The data
+
+```{r data}
+
+data <- read_excel('datatabell_190424_final.xlsx')
+
+```
+
+
+## Pre-process the data table
+
+```{r pre_process_data}
+
+data <-  data %>% 
+  select(KIMOVE_ID:Model) %>% 
+  select( -("VSGP@MRI":"ProbMSA@MRI")) %>% 
+  rename_all(tolower) %>% 
+  rename("gender" = "gender (0=male,1=female)", "h_y" = "h&y", "symptom_duration"
+         = "symtomdur", "diagnosis" = "diagnos") %>% 
+  as_tibble()
+
+```
+
+###changes characters to numerics and vice-versa
+
+Change the thicknesses to numerical variables, as they are currently falsely 
+believed to be character strings. age, symptom_duration also. diagnosis and 
+gender should be factors, but are currently numeric. As only Kimove_id and h_y 
+are correctly labeles as character and numeric, respectively, the simplest is to
+just change all numerics into characters and vice versa and then return kimove_id 
+to characted and h-y to numeric. However, if I change kimove_id to numeric it 
+will be lost, so I will not select it when transforming the variables.
+
+```{r factors_numerics}
+
+Kimove_id <- data$kimove_id
+
+Model <- data$model
+
+data <- data %>%
+  mutate_if(is.character, as.numeric) %>% 
+  mutate(gender = as.factor(gender),
+         diagnosis = as.factor(diagnosis)) 
+
+data$kimove_id <- Kimove_id
+
+data$model <- Model
+
+```
+
+###change factor levels of columns
+
+"diagnosis" from "1,2,3" to "PD,PSP,MSA" and "gender" from "0" and "1" to "male"
+and "female"
+
+```{r factor_levels}
+
+data <- data %>%
+  mutate(diagnosis = fct_recode(diagnosis,
+    "PD"  = "1", 
+    "PSP" = "2",
+    "MSA" = "3")) %>% 
+  mutate(gender = fct_recode(gender,
+    "male"  = "0",
+    "female" = "1"))
+  
+```
+
+# Descriptive statistics and correlations
+
+##Demographic
+
+```{r demographic, results = 'asis', comment = NA, prompt = FALSE, cache = FALSE, eval = FALSE}
+
+demography <- data %>% 
+  select(diagnosis, age, gender, h_y, symptom_duration, model) %>% 
+  rename("Hoehn and Yahr scale" = h_y, "Symptom duration" = symptom_duration)
+
+print(dfSummary(demography, plain.ascii = FALSE, style = "grid", 
+          graph.magnif = 0.75, valid.col = FALSE, na.col = FALSE, varnumbers = F,
+          tmp.img.dir = "/tmp"))
+  
+ print(stby(data = demography, INDICES = data$diagnosis, FUN = descr,
+           stats = c("mean", "sd", "min", "med", "max"),  transpose = TRUE))
+
+```
+
+
+
+##Shapiro-wilk test for normality
+
+```{r normality_test}
+
+ data %>% 
+    keep(is.numeric) %>% 
+    select(-h_y) %>% 
+    gather(key = "variable_name", value = "value") %>% 
+    group_by(variable_name)  %>% 
+    do(tidy(shapiro.test(.$value))) %>% 
+    ungroup() %>% 
+    select(-method) %>% 
+    kable(digits = 3, caption = "Shapiro-Wilk test for normality of all numeric variables") 
+
+# sw_test_results <- data %>% 
+#     gather(key = "variable_name", value = "value", c("age", "symptom_duration", "lh_bankssts_thickness":"etiv")) %>% 
+#     group_by(variable_name, diagnosis)  %>% 
+#     do(tidy(shapiro.test(.$value))) %>% 
+#     ungroup() %>% 
+#     arrange(diagnosis)
+
+
+# kable(sw_test_results, digits = 3, format = "latex", longtable = T, caption =
+#         "Shapiro-Wilk test for normality by diagnosis")  
+
+
+```
+
+
+## $\chi^2$ - test
+
+$$\chi^2 = \sum \frac {(O - E)^2}{E}$$
+Diagnosis is the response variable and gender is the explanatory variable
+
+```{r chisq}
+
+
+data %>% 
+  chisq_test(formula = diagnosis ~ gender) %>% 
+  rename("Chisq-statistic" = statistic,"Degrees of freedom" = chisq_df,
+         "p-value" = p_value) %>% 
+  kable(digits = 3, caption = "chisq-test")
+
+data %>% 
+  chisq_test(formula = diagnosis ~ model) %>% 
+  rename("Chisq-statistic" = statistic,"Degrees of freedom" = chisq_df,
+         "p-value" = p_value) %>% 
+  kable(digits = 3, caption = "chisq-test")
+
+CrossTable(data$diagnosis, data$model,
+       fisher = T, chisq = T, expected = T,
+       prop.c = F, prop.t = F, prop.chisq = F, 
+       sresid = T, format = 'SPSS')
+
+```
+
+## One-way Analysis of variance (ANOVA)
+
+Age as the dependant variable and diagnosis as the independant variable
+
+```{r anova}
+
+anovar <- aov(age ~ diagnosis, data = data) 
+
+anovar %>% 
+  tidy() %>% 
+kable( digits = 3, caption = "One-way ANOVA")
+
+tidy(TukeyHSD(anovar, which = 'diagnosis')) %>% 
+  kable(digits = 3, caption = "Tukey post-hoc test")
+
+```
+
+
+##Kruskall-Wallis test
+
+```{r KW}
+
+kw <- kruskal.test(age ~ diagnosis, data = data)
+
+kw %>% 
+  tidy() %>% 
+kable( digits = 3, caption = "Kruskall-Wallis test")
+
+tidy(pairwise.wilcox.test(data$age, data$diagnosis, p.adj = "bonf")) %>% 
+  kable(digits = 3, caption = "Pair-wise Wilcoxon rank-sum test")
+
+```
+
+
+##Skewness of numeric variables.
+
+```{r skew}
+
+data %>%
+  summarise_if( is.numeric, e1071::skewness ) %>%
+  kable(digits = 3, caption = "Skewness")
+
+```
+
+##Age distribution
+
+Age was found not to be normally distributed by the Shapiro-Wilk test, and these 
+plots sort of confirm that notion. The age variable appears to have a slightly
+skewed distribution.
+
+```{r age_distribution}
+
+ggplot(data, aes(x=age))+
+  geom_histogram(aes(y=..density..), alpha=0.5, 
+                position="identity", color="darkblue") + 
+  geom_density(color="darkblue", alpha=.7)+
+geom_vline(aes(xintercept=mean(age)),
+            color="blue", linetype="dashed", size=1, alpha = .4)+
+  geom_text(aes(x=mean(age), label="Mean", y=0), colour="red", 
+        vjust = 1.2, text=element_text(size=14)) +
+  ggtitle("Age - Histogram")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(data, aes(x=age, fill = diagnosis))+
+  geom_density(color="darkblue") + 
+  ggtitle("Age by diagnosis") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+```
+
+
+##Pearson correlation coefficients between brain regions
+
+A note on the interpretation of these tables: The purpose of obtaining the 
+correlation coefficients was to see if several regions were highly correlated.
+This information may be of value when choosing machine learning algorithm, as 
+some are not compatible with higly correlated data. These correlation
+coefficients were made on the entire data and not for each respective diagnosis.
+
+```{r correlation}
+
+
+data %>%
+  select("lh_bankssts_thickness" : "rh_meanthickness_thickness", -(c("rh_meanthickness_thickness","lh_meanthickness_thickness" ))) %>%
+  correlate() %>%
+  shave() %>% 
+  stretch(na.rm = TRUE) %>% 
+  filter(r > 0.8) %>% 
+  mutate(x = str_replace(string=x, pattern='_thickness', replacement="")) %>% 
+  mutate(y = str_replace(string=y, pattern='_thickness', replacement="")) %>%
+  arrange(desc(r)) %>% 
+  kable(digits = 3, caption = "Brain regions with the greatest correlation")
+
+data %>%
+  select("lh_bankssts_thickness" : "rh_meanthickness_thickness", -(c("rh_meanthickness_thickness","lh_meanthickness_thickness" ))) %>%
+  correlate() %>%
+  shave() %>% 
+  stretch(na.rm = TRUE) %>%
+  top_n(-10) %>%
+  mutate(x = str_replace(string=x, pattern='_thickness', replacement="")) %>% 
+   mutate(y = str_replace(string=y, pattern='_thickness', replacement="")) %>% 
+  arrange(r) %>% 
+  kable(digits = 2, caption = "The 10 least correlated brain regions")
+ 
+  
+data %>%
+  select("lh_bankssts_thickness" : "rh_meanthickness_thickness", -(contains("meanthickness"))) %>%
+  correlate() %>%
+  shave() %>% 
+  stretch(na.rm = TRUE) %>% 
+  filter(str_detect(x, "^lh"),
+         str_detect(y, "^rh")) %>% 
+  mutate(x = str_replace(string=x, pattern='lh_', replacement="")) %>% 
+  mutate(y = str_replace(string=y, pattern='rh_', replacement="")) %>% 
+  filter(x == y) %>% 
+  select("Region" = y, r) %>%
+  mutate(Region = str_replace(string=Region, pattern='_thickness',      replacement="")) %>% 
+  arrange(desc(r)) %>% 
+  kable(digits = 2, caption = "Correlation between the left and the right hemisphere")
+  
+  
+
+```
+
+###Correlation plot
+
+Heatmap of the correlations, ordered using hierarchical clustering.
+
+```{r corrplot, results='asis'}
+
+data %>%
+  select(age:etiv, -gender) %>% 
+  cor(.) %>%
+  corrplot(., order = "hclust", tl.cex = .35)
+
+```
+
+From the graph, it seems that there are groups of predictors, that have strong positive correlations (dark blue).
+
+#PCA
+
+```{r pca}
+
+kimove_pca <- data %>% 
+  select(-kimove_id, -model) %>% 
+  mutate(gender = ifelse(gender == "male", 0, 1)) %>% 
+  nest() %>% 
+  mutate(pca = map(data, ~prcomp(.x %>% select(-diagnosis), center = TRUE, scale = TRUE)), 
+         pca_aug = map2(pca, data, ~broom::augment(.x, data = .y))) 
+
+```
+
+##results
+
+```{r pca_results}
+
+var_exp <- kimove_pca %>%
+  unnest(pca_aug) %>% 
+  summarize_at(.vars = vars(contains("PC")), .funs = funs(var)) %>% 
+  gather(key = pc, value = variance) %>% 
+  mutate(var_exp = variance/sum(variance),
+         cum_var_exp = cumsum(var_exp),
+         pc = str_replace(pc, ".fitted", ""))
+
+```
+## Variance explained by each of the 9 first principal components
+
+```{r var_exp}
+
+var_exp %>% 
+  slice(1:9) %>% 
+  rename(
+    `Variance Explained` = var_exp,
+    `Cumulative Variance Explained` = cum_var_exp
+  ) %>% 
+  gather(key = key, value = value, `Variance Explained`:`Cumulative Variance Explained`) %>% 
+  ggplot(aes(pc, value, group = key)) + 
+  geom_point() + 
+  geom_line() + 
+  facet_wrap(~key, scales = "free_y") +
+  theme_bw() +
+  lims(y = c(0, 1)) +
+  labs(y = "Variance",
+       title = "Variance explained by the 9 first principal component",
+       subtitle = "Note: There are 76 PC's in total")
+       
+
+```
+
+##Screeplot
+
+A barplot showing the variances for each Principal Component
+
+```{r pca_plot}
+
+var_exp %>% 
+mutate(var_exp = var_exp*100) %>% 
+  slice(1:9) %>% 
+  arrange(var_exp) %>% 
+ggplot( aes(x=pc, y = var_exp, fill = pc)) +
+  geom_bar(stat="identity") + 
+  geom_text(aes(label= round(var_exp)), vjust=1.2, color="white", size=3.5) +
+  xlab("Principal Components") +
+  ylab("Variance Explained") +
+  theme_bw() +
+  ggtitle("Scree plot of the 9 first principle components (out of a total of 76 PC's)")
+
+
+
+```
+
+
+##PCA graph
+
+autoplot.prcomp() can take any arguments that can be passed to ggbiplot(), 
+so to see all of your options use ?ggbiplot.
+
+```{r pca_graph}
+
+var_per <- var_exp %>% 
+mutate(var_per = round(var_exp*100)) %>%
+  select(var_per)
+
+kimove_pca %>% 
+   mutate(
+    pca_graph = map2(
+      .x = pca,
+      .y = data,
+      ~ autoplot(.x, data = .y, colour = "diagnosis", frame = TRUE,
+                 frame.type = 'norm') +
+        theme_bw() +
+        labs(x = paste("PC1", "(", var_per[ 1, 1], "%", ")", sep=""),
+             y = paste("PC2 - ", var_per[ 2, 1], "%", sep=""),
+             title = "First two principal components of PCA on the 
+             kimove dataset")
+    )
+  ) %>%
+  pull(pca_graph)
+
+
+
+```
+
+PCA was not very usefull here!
+
+#Support Vector Machine
+
+##split the data
+
+Randomly split the data into a training dataset and a test dataset using
+approximately 75% of the data in the training dataset, with the remaining 
+approximately 25% ending up in the test dataset. The software is also instructed
+to maintain the same distribution of the diagnoses as is in the original data, 
+so that e.g. 75% of PSP patients are allocated to  the the training dataset, 
+which constitute the same proportion of the total patients as PSP does from the 
+original, unsplit, data.
+
+
+```{r split}
+
+kimove <- data %>% 
+  select(-c(kimove_id, model)) 
+  
+
+set.seed(123)
+
+train_test_split <- initial_split(kimove, strata = "diagnosis", prop = .75)
+
+diagnosis_train <- training(train_test_split)
+diagnosis_test <- testing(train_test_split)
+
+```
+
+
+##Create recipes in order to pre-process the data
+
+step_dummy creates dummy variable e.g. turns male and female in gender into 
+two different columns that have 1's and 0's. The number of new columns created 
+is by default the number of different labels in a column (e.g. male and female) 
+minus one. Thus, for gender only 1 column exists and no new column is created.
+
+step_scale och step_center scale all variables equally, with a mean of 0 and 
+a standard deviation equal to 1. This is accomplished by subtracting the mean 
+and dividing by the standard deviation.
+
+step_boxcox performs boxcox transformation on all numeric variables. This can 
+involve doing a logarithmic transformation of one variable and taking the squared 
+root of all rows in a column, depending on a certain lamda value which is 
+calculated for each column. This makes the data more normaly distributed.
+The Box-Cox transformation, which requires a strictly positive variable, can thus 
+be used to rescale a variable to be more similar to a normal distribution. 
+In this package, the partial log-likelihood function is directly 
+optimized within a reasonable set of transformation values 
+(which can be changed by the user).
+
+This transformation is typically done on the outcome variable using the 
+residuals for a statistical model (such as ordinary least squares). 
+Here, a simple null model (intercept only) is used to apply the transformation 
+to the predictor variables individually. 
+This can have the effect of making the variable distributions more symmetric.
+
+step_pca extracts the principle components of the data and then replaces the 
+numeric variables with the principle components.Threshold set att 9% of the 
+variance explained, corresponding to the first 61 principle components out of 
+a total of 76 principle components for this data (see the object 
+var_exp from the pca above)
+
+step_downsample: The default value for the ratio argument (1) is used, which 
+means that all other levels are sampled down to have the same frequency as the 
+least occurring level. A value of 2 would mean that the majority levels will 
+have (at most) (approximately) twice as many rows than the minority level.
+
+step_corr potentially removes variables that have large absolute correlations 
+(above the specified threshold) with other variables. The default measure for 
+correlation is the Pearson correlation coefficient, which is used for parametric 
+data. The data was evaluated above for normality using the shapiro wilk test.
+It is highly questionable that the data is normally distributed in any way, as
+multiple variables had low p-values in the shapiro wilk test. 
+However, for the purposeof this analysis it does not matter, as the 
+coefficient of variation is simply used as a means of filtering data. An 
+alternative means of filtering using step-corr could for instance be using
+Spearman's coefficient of correlation, which is generally considered better than
+Pearson's for non-parametric data. However, as the MRI data underwent smoothing,
+it is assumed that the Pearsons coefficient is also appropriate for use on this 
+data.
+
+step_nzv removes variables with zero variance and "near-zero" variance. 
+These variables either have very few unique values relative to the number 
+of samples and/or the ratio of the frequency of the most common value to the 
+frequency of the second most common value is large. Variables are determined to 
+be near-zero variables if The ratio of the most common value to the second most 
+common value is less than 95:5 or if The percentage of distinct values out of 
+the number of total samples is less than 10
+
+
+```{r recipe}
+
+rec_orig <-recipe(diagnosis ~ ., data = diagnosis_train) %>%
+step_dummy(all_nominal(), - all_outcomes())
+
+rec_obj <-recipe(diagnosis ~ ., data = diagnosis_train) %>%
+step_dummy(all_nominal(), - all_outcomes()) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric())
+
+rec_boxcox <-recipe(diagnosis ~ ., data = diagnosis_train) %>%
+step_BoxCox(all_numeric()) %>%
+step_dummy(all_nominal(), - all_outcomes()) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric())
+
+rec_pca <-recipe(diagnosis ~ ., data = diagnosis_train) %>%
+step_dummy(all_nominal(), - all_outcomes()) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric()) %>%
+step_pca(all_numeric(), threshold = .99)
+
+rec_both <-recipe(diagnosis ~ ., data = diagnosis_train) %>%
+step_BoxCox(all_numeric()) %>%
+step_dummy(all_nominal(), - all_outcomes()) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric()) %>%
+step_pca(all_numeric(), threshold = .99)
+
+rec_corr <-recipe(diagnosis ~ ., data = diagnosis_train) %>%
+step_corr(all_numeric(), threshold = .8) %>%
+step_dummy(all_nominal(), - all_outcomes()) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric())
+  
+rec_down <-  recipe(diagnosis ~ ., data = diagnosis_train) %>%
+step_dummy(all_nominal(), - all_outcomes()) %>% 
+step_center(all_numeric()) %>%
+step_scale(all_numeric()) %>%
+step_downsample(diagnosis)
+
+#The following models were tested during analysis, but did not work well!
+# rec_corr_down <-  recipe(diagnosis ~ ., data = diagnosis_train) %>%
+# step_corr(all_numeric(), threshold = .80) %>%
+# step_dummy(all_nominal(), - all_outcomes()) %>% 
+# step_center(all_numeric()) %>%
+# step_scale(all_numeric()) %>%
+# step_downsample(diagnosis)
+# 
+# rec_corr_pca <-recipe(diagnosis ~ ., data = diagnosis_train) %>%
+# step_corr(all_numeric(), threshold = .80) %>%
+# step_dummy(all_nominal(), - all_outcomes()) %>%
+# step_center(all_numeric()) %>%
+# step_scale(all_numeric()) %>%
+# step_pca(all_numeric(), threshold = .99)
+# 
+# rec_boxcor <-recipe(diagnosis ~ ., data = diagnosis_train) %>%
+# step_BoxCox(all_numeric()) %>%
+# step_dummy(all_nominal(), - all_outcomes()) %>% 
+# step_corr(all_numeric(), threshold = .80) %>%
+# step_center(all_numeric()) %>%
+# step_scale(all_numeric())  
+#
+# rec_nzv <-recipe(diagnosis ~ ., data = diagnosis_train) %>%
+# step_nzv(all_predictors()) %>%
+# step_dummy(all_nominal(), - all_outcomes()) %>%
+# step_center(all_numeric()) %>%
+# step_scale(all_numeric())
+ 
+
+
+```
+
+
+###Metric F-score
+
+$$F  = 2 \times \frac{Precision \times Recall}{Precision + Recall}$$
+
+F-score is defined as the harmonic mean of Precision and Recall. F-score is
+a better metric of model performance when using unbalanced data 
+(i.e. many more PD patients than patients with MSA or PSP) than simply the
+proportion of correctly classified instances, also known as "Accuracy" 
+in the context of Machine Learning
+$(Accuracy=\frac{Correct\: Predictions}{Total\: number\: of \:Predictions})$.
+
+This is due to the fact that F-score takes into account both Precision and 
+Recall (Sensitivity). For instance, If a model is good at predicting PD patients
+but bad at predicting PSP and MSA, the accuracy will be very high, but the model
+does not perform in such a way which we would consider to be clinically useful. 
+By using both precision and recall, F-score accounts for not only the 
+true positives, but also the number of false negatives that in the example above 
+would help in showing that the models performance is, in fact, not quite as good 
+as the Accuracy would make it seem.
+
+
+```{r f_score}
+
+F1 <- function(data, lev = NULL, model = NULL) {
+  f1_val <- F1_Score(y_pred = data$pred, y_true = data$obs, positive = lev[1])
+  c(F1 = f1_val)
+}
+
+
+```
+
+
+###Preparation for 10-fold cross-validation
+
+Training settings for models using the kappa metric below.
+
+```{r train_control_kappa}
+
+control <- trainControl(
+ method = "repeatedcv",
+ number = 10,
+ repeats = 10)
+
+```
+
+Training settings for models using F-score
+
+```{r train_control_f_score}
+
+ctrl <- trainControl(
+ method = "repeatedcv",
+ number = 10,
+ repeats = 10,
+ summaryFunction = F1, classProbs = TRUE)
+
+
+```
+
+
+## Choosing threshold 
+
+##step_corr thershold
+
+One way of dealing with the potential drawbacks of the observed "collinearity clusters" 
+found in the correlation plot above is to apply a correlation filter. The 
+correlation filter poses a heuristic approach to dealing with highly correlated 
+predictors. It removes the predictors with the highest between-predictor 
+correlations one at a time, until all between-predictor correlations are below 
+some critical threshold.
+
+modelgrid works by first creating an empty model grid with the model_grid() 
+function. Then share_settings() sets shared settings, that will apply to all 
+models by default. Then the models are trained using Caret package train function 
+and the statistics can be displayed using Caret package.
+
+
+Note: The following code was not run when creating this document, it was 
+only used during the analysis to aid in choosing an appropriate threshold for 
+step_corr
+
+
+```{r corr_threshold, eval = FALSE}
+
+
+models_cor <- 
+  model_grid() %>%
+  share_settings(
+    data = diagnosis_train,
+    trControl = control,
+    metric = "Kappa",
+    method = "svmRadial",
+    tuneLength = 12
+    )
+
+initial_recipe <- rec_obj
+
+models_cor <- models_cor %>%
+  add_model(model_name = "baseline", 
+            x = initial_recipe)
+
+models_cor <- models_cor %>%
+  add_model(model_name = "corr_.7", 
+            x = initial_recipe %>%
+              step_corr(all_predictors(), threshold = .7)) %>%
+  add_model(model_name = "corr_.75", 
+            x = initial_recipe %>%
+              step_corr(all_predictors(), threshold = .75)) %>%
+  add_model(model_name = "corr_.8", 
+            x = initial_recipe %>%
+              step_corr(all_predictors(), threshold = .8)) %>%
+  add_model(model_name = "corr_.85", 
+            x = initial_recipe %>%
+              step_corr(all_predictors(), threshold = .85)) %>%
+  add_model(model_name = "corr_.9", 
+            x = initial_recipe %>%
+              step_corr(all_predictors(), threshold = .9))%>%
+  add_model(model_name = "corr_.95", 
+            x = initial_recipe %>%
+              step_corr(all_predictors(), threshold = .95))
+
+models_cor <- models_cor %>% train(.)
+
+models_cor$model_fits %>%
+  map(pluck(c("recipe", "term_info", "role"))) %>%
+  map_int(~ sum(.x == "predictor")) %>% 
+kable(digits = 3, caption = "Number of columns kept after the step_corr function")
+
+#resamps_cor <- models_cor$model_fits %>% resamples(.)
+
+#summary(resamps_cor)
+
+
+```
+
+
+##step_pca threshold
+
+Another approach to dealing with highly correlated predictors is to apply a
+Principal Component Analysis transformation of the predictors in order to reduce
+the dimensions of data set.
+
+
+Note: The following code was not run when creating this document, it was 
+only used during the analysis to aid in choosing an appropriate threshold for 
+step_pca* 
+ 
+
+```{r pca_threshold, eval = FALSE}
+
+models_pca <- 
+  model_grid() %>%
+  share_settings(
+    data = diagnosis_train,
+    trControl = control,
+    metric = "Kappa",
+    method = "svmRadial",
+    tuneLength = 12
+    )
+
+models_pca <- models_pca %>%
+  add_model(model_name = "baseline", 
+            x = initial_recipe)
+
+models_pca <- models_pca %>%
+  add_model(model_name = "pca_.75", 
+            x = initial_recipe %>%
+              step_pca(all_predictors(), threshold = .75)) %>%
+  add_model(model_name = "pca_.8", 
+            x = initial_recipe %>%
+              step_pca(all_predictors(), threshold = .8)) %>%
+  add_model(model_name = "pca_.85",
+            x = initial_recipe %>%
+              step_pca(all_predictors(), threshold = .85)) %>%
+  add_model(model_name = "pca_.9", 
+            x = initial_recipe %>%
+              step_pca(all_predictors(), threshold = .9)) %>%
+  add_model(model_name = "pca_.95",
+            x = initial_recipe %>%
+              step_pca(all_predictors(), threshold = .95)) %>%
+  add_model(model_name = "pca_.95",
+            x = initial_recipe %>%
+              step_pca(all_predictors(), threshold = .99))
+
+
+models_pca <- train(models_pca)
+
+models_pca$model_fits %>%
+  map(pluck(c("recipe", "term_info", "role"))) %>%
+  map_int(~ sum(.x == "predictor")) %>% 
+kable(digits = 3, caption = "Number of PC's kept after the step_pca function")
+
+#resamps_pca <- models_pca$model_fits %>% resamples(.)
+
+#summary(resamps_pca)
+
+```
+
+
+###check variables removed by step_cor
+
+Using a threshold of Pearson correlation coefficient greater than 0.8.
+
+```{r check_cor}
+
+check_cor <- prep(rec_corr, training = diagnosis_train)
+
+
+kable(check_cor$steps[[1]]$removals, col.names = "Removed variables", 
+caption = "step_corr removals")
+
+
+```
+
+Comment: many of the regions removed by step_corr due to high correlation are 
+also the ones that were found to have statistically significant cortical 
+thinning in QDEC.
+
+
+###check number of principle components used by step_pca
+
+Using a threshold of 99% of the variance explained.
+
+```{r check_pca}
+
+check_pca <- prep(rec_pca, training = diagnosis_train)
+
+
+kable(check_pca$steps[[4]]$num_comp, col.names = "Principle Components", 
+caption = "step_pca Principle components retained")
+
+```
+
+###check lambda values calculated by step_boxcox
+
+
+Note: The following code was not run when creating this document, it took
+to much space*
+
+
+```{r lambda}
+
+check_boxcox <- prep(rec_boxcox, training = diagnosis_train)
+
+
+kable(check_boxcox$steps[[1]]$lambdas, col.names = "Lambda", 
+caption = "step_boxcox Lambda values")
+
+```
+
+
+#Train models using the "Caret" package in R
+
+SVM using a (Gaussian) radial basis function kernel has two hyperparameters: 
+Cost (also just simply referred to as "C") and $\gamma$ or $\sigma$. $\gamma$
+and $\sigma$ are related and can be used interchangeably, as shown by the 
+following equation:
+
+$$\gamma = \frac{1}{2\sigma^2}$$
+The number of Cost parameters that are tested during each crossvalidation step
+are denoted by the Tunelength paramater in the "train" function from the "Caret"
+package.
+
+$\sigma$ is calculated by the "sigest" function in the kernlab pakage, which is 
+called upon by the "train" function from "Caret". the optimal values of the 
+hyper-parameter of sigma are shown to lie in between the 0.1 and 0.9 quantile of 
+the $||x-x'||$ statistic. The "sigest" from the "kernlab" package function 
+uses a sample of the training set to estimate the quantiles and returns a vector 
+containing the values of these quantiles. It has empirically been shown by Caputo,
+Sim, Furesjo, and Smola in an article from 2002 that any value within this interval 
+leads to a good performance in the model. A value from this interval is then used
+the value for $\sigma$ by the "train" function from "Caret" and it is kept 
+constant as long as the training data which is used is the same. For instance, 
+the value for $\sigma$ is slightly different in the model which uses a 
+downsampled dataset than that which is used in the other models.
+
+```{r svm_f_score}
+
+set.seed(123)
+
+svm <- train(rec_obj, data = diagnosis_train,
+method = "svmRadial",
+tuneLength = 12,
+trControl = ctrl)
+
+set.seed(123)
+
+boxcox <- train(rec_boxcox, data = diagnosis_train,
+method = "svmRadial",
+tuneLength = 12,
+trControl = ctrl)
+
+set.seed(123)
+
+pca <- train(rec_pca, data = diagnosis_train,
+method = "svmRadial",
+tuneLength = 12,
+trControl = ctrl)
+
+set.seed(123)
+
+both<- train(rec_both, data = diagnosis_train,
+method = "svmRadial",
+tuneLength = 12,
+trControl = ctrl)
+
+set.seed(123)
+
+orig <- train(rec_orig, data = diagnosis_train,
+method = "svmRadial",
+tuneLength = 12,
+trControl = ctrl)
+
+set.seed(123)
+
+svm_corr <- train(rec_corr, data = diagnosis_train,
+method = "svmRadial",
+tuneLength = 12,
+trControl = ctrl)
+
+set.seed(123)
+
+down <- train(rec_down, data = diagnosis_train,
+method = "svmRadial",
+tuneLength = 12,
+trControl = ctrl)
+
+models <- list("SVM" = svm, "BoxCox" = boxcox, "PCA" = pca, "Both" = both, "Orig" = orig, "SVM_corr" = svm_corr, "Down" = down )
+
+```
+
+
+##Results from the 10-fold cross validation?
+
+```{r resample_result_f_score}
+
+resamps <- resamples(models)
+
+print(summary(resamps))
+
+
+```
+
+##Model performance using the "Yardstick" - package
+
+
+```{r svm_f_score_model_performance}
+
+testing_results <- diagnosis_test %>%
+        mutate("SVM" = predict(svm, diagnosis_test)) %>% 
+        mutate("BoxCox" = predict(boxcox, diagnosis_test)) %>% 
+        mutate("PCA" = predict(pca, diagnosis_test)) %>% 
+        mutate("Both" = predict(both, diagnosis_test)) %>% 
+        mutate("Orig" = predict(orig, diagnosis_test)) %>%  
+        mutate("SVM_corr" = predict(svm_corr, diagnosis_test)) %>% 
+        mutate("Down" = predict(down, diagnosis_test))
+  
+  
+SVM <- conf_mat(testing_results, truth = diagnosis, estimate = SVM)
+
+autoplot(SVM, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap SVM") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+SVM <- (summary(SVM)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(SVM,digits = 3, caption = "Support Vector Machine")
+
+
+PCA <- conf_mat(testing_results, truth = diagnosis, estimate = PCA)
+
+autoplot(PCA, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap SVM with PCA") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+PCA <- (summary(PCA)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(PCA,digits = 3, caption = "SVM with PCA")
+
+BOXCOX <- conf_mat(testing_results, truth = diagnosis, estimate = BoxCox)
+
+autoplot(BOXCOX, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap BoxCox") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+BOXCOX <- (summary(BOXCOX)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(BOXCOX,digits = 3, caption = "SVM with BoxCox")
+
+Both <- conf_mat(testing_results, truth = diagnosis, estimate = Both)
+
+autoplot(Both, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap with both boxcox and pca") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+Both <- (summary(Both)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(Both,digits = 3, caption = "SVM with both BoxCox and PCA")
+
+Orig <- conf_mat(testing_results, truth = diagnosis, estimate = Orig)
+
+autoplot(Orig, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap svm without centering and scaling") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+Orig <- (summary(Orig)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(Orig,digits = 3, caption = "SVM without centering and scaling")
+
+SVM_corr <- conf_mat(testing_results, truth = diagnosis, estimate = SVM_corr)
+
+autoplot(SVM_corr, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap SVM without correlation") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+SVM_corr <- (summary(SVM_corr)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(SVM_corr,digits = 3, caption = "SVM without correlations")
+
+Down <- conf_mat(testing_results, truth = diagnosis, estimate = Down)
+
+autoplot(Down, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap SVM with downsampling") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+Down <- (summary(Down)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(Down,digits = 3, caption = "Support Vector Machine with downsampling")
+
+```
+
+
+## Model performance for each diagnosis
+
+```{r svm_f_score_model_performance_per_diagnosis}
+
+SVM_cf <- tidy(confusionMatrix(testing_results$diagnosis,testing_results$SVM)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(SVM_cf, digits = 3, caption = "Support Vector Machine")
+
+Orig_cf <- tidy(confusionMatrix(testing_results$diagnosis,testing_results$Orig)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(Orig_cf, digits = 3, caption = "Support Vector Machine without scaling and centering")
+
+boxcox_cf <- tidy(confusionMatrix(testing_results$diagnosis,testing_results$BoxCox)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(boxcox_cf, digits = 3, caption = "Support Vector Machine with BoxCox transformation")
+
+pca_cf <- tidy(confusionMatrix(testing_results$diagnosis,testing_results$PCA)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(pca_cf, digits = 3, caption = "Support Vector Machine with PCA")
+
+both_cf <- tidy(confusionMatrix(testing_results$diagnosis,testing_results$Both)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(both_cf, digits = 3, caption = "Support Vector Machine with both PCA and BoxCox transformation")
+
+svm_corr_cf <- tidy(confusionMatrix(testing_results$diagnosis,
+                                    testing_results$SVM_corr)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(svm_corr_cf, digits = 3, caption = "Support Vector Machine without correlation")
+
+down_cf <- tidy(confusionMatrix(testing_results$diagnosis,testing_results$Down)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(down_cf, digits = 3, caption = "Support Vector Machine with downsampling")
+
+```
+
+#SVM using the metric "kappa" instead of F-score
+
+
+##Train models using metric = "Kappa"
+
+Like F-score, which considers both Precision and Recall, as well as 
+Youden's index which takes into consideration both sensitivity and specificity, 
+Kappa or "Cohen's Kappa" or simply $\kappa$ is a better metric of model 
+performance than simply the proportion of correctly classified instances
+if unbalanced data is uses, as κ takes into account not only the number of 
+correct predictions, but also the possibility of the agreement occurring by chance.
+
+$$\kappa = \frac{p_o-p_e}{1-p_e}$$ 
+Where $p_o$ is the propportion of correct predictions out of the total number of
+individual diagnoses included in this study (this is identical to "Accuracy" 
+in the context of Machine Learning,
+$Accuracy=\frac{Correct\: Predictions}{Total\: number\: of \:Predictions}$). 
+$p_e$ is is the hypothetical probability of chance agreement between observed 
+and predicted data, using the observed data to calculate the probabilities 
+of  randomly observing the predicted results of  each category. 
+If the predicted match the observed perfectly, $ {\kappa =1}$. If 
+there is no concordance between the observed and predicted data, other than 
+what would be expected by chance (as given by $p_e$), ${\kappa =0}$. Also, 
+$\kappa$ can be negative, which that the model performs worse than what can be 
+expected by random chance alone.
+
+$p_e$ is calculated by the following equation:
+
+$$p_e=\frac{1}{N^2}\sum_{k} n_{k1}n_{k2}$$   
+
+As Cohen's Kappa was initially devised for use in inter-rater variability,
+the variables in the equation for $p_e$ are described as follows:
+"For categories k, number of items N and $n_{ki}$ is the number of times 
+rater i predicted category k. The two raters are analogous to observed and 
+predicted results in Machine learning.
+
+```{r train_kappa, message = FALSE, warning = FALSE}
+
+set.seed(123)
+
+svm_k <- train(rec_obj, data = diagnosis_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+orig_k <- train(rec_orig, data = diagnosis_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+boxcox_k <- train(rec_boxcox, data = diagnosis_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+pca_k <- train(rec_pca, data = diagnosis_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+both_k <- train(rec_both, data = diagnosis_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+corr_k <- train(rec_corr, data = diagnosis_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+
+set.seed(123)
+
+down_k <- train(rec_down, data = diagnosis_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+models_kappa <- list("SVM" = svm_k, "BoxCox" = boxcox_k, "PCA" = pca_k, "Both" = both_k, "Orig" = orig_k, "Corr" = corr_k, "Down" = down_k)
+
+```
+
+
+
+##Results from the 10-fold cross validation on the models with metric = "Kappa"
+
+```{r resamples_kappa}
+
+resamps_kappa <- resamples(models_kappa)
+
+print(summary(resamps_kappa))
+
+
+```
+
+
+##Model performance using metric = "Kappa" with the "Yardstick" - package
+
+Same as above, but using metric = kappa to choose the optimal model
+
+```{r svm_model_performance_kappa}
+
+testing_results_kappa <- diagnosis_test %>%
+        mutate("SVM" = predict(svm_k, diagnosis_test)) %>% 
+        mutate("BoxCox" = predict(boxcox_k, diagnosis_test)) %>% 
+        mutate("PCA" = predict(pca_k, diagnosis_test)) %>% 
+        mutate("Both" = predict(both_k, diagnosis_test)) %>% 
+        mutate("Orig" = predict(orig_k, diagnosis_test)) %>%  
+        mutate("SVM_corr" = predict(corr_k, diagnosis_test)) %>% 
+        mutate('Down' = predict(down_k, diagnosis_test)) 
+        
+
+SVM_k <- conf_mat(testing_results_kappa, truth = diagnosis, estimate = SVM)
+
+autoplot(SVM_k, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap SVM using Kappa metric") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+SVM_k <- (summary(SVM_k)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(SVM_k,digits = 3, caption = "Support Vector Machine using Kappa metric") 
+
+
+
+PCA_k <- conf_mat(testing_results_kappa, truth = diagnosis, estimate = PCA)
+
+autoplot(PCA_k, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap SVM with PCA using Kappa metric") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+PCA_k <- (summary(PCA_k)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(PCA_k,digits = 3, caption = "SVM with PCA using Kappa metric")
+
+BOXCOX_k <- conf_mat(testing_results_kappa, truth = diagnosis, estimate = BoxCox)
+
+autoplot(BOXCOX_k, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap BoxCox using Kappa metric") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+BOXCOX_k <- (summary(BOXCOX_k)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(BOXCOX_k,digits = 3, caption = "SVM with BoxCox using Kappa metric")
+
+Both_k <- conf_mat(testing_results_kappa, truth = diagnosis, estimate = Both)
+
+autoplot(Both_k, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap with both boxcox and pca using Kappa metric") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+Both_k <- (summary(Both_k)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(Both_k,digits = 3, caption = "SVM with both BoxCox and PCA using Kappa metric")
+
+Orig_k <- conf_mat(testing_results_kappa, truth = diagnosis, estimate = Orig)
+
+autoplot(Orig_k, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap svm without centering and scaling using Kappa metric") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+Orig_k <- (summary(Orig_k)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(Orig_k,digits = 3, caption = "SVM without centering and scaling using Kappa metric")
+
+SVM_corr_k <- conf_mat(testing_results_kappa, truth = diagnosis, estimate = SVM_corr)
+
+autoplot(SVM_corr_k, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap SVM without correlation using Kappa metric") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+SVM_corr_k <- (summary(SVM_corr_k)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(SVM_corr_k,digits = 3, caption = "SVM without correlations using Kappa metric")
+
+
+
+Down_k <- conf_mat(testing_results_kappa, truth = diagnosis, estimate = Down)
+
+autoplot(Down_k, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap SVM with downsampling using Kappa metric") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+Down_k <- (summary(Down_k)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(Down_k,digits = 3, caption = "Support Vector Machine with downsampling using Kappa metric")
+
+
+```
+
+Best performance by SVM with step_corr, followed by SVM with step_pca. 
+
+
+## Model performance for each diagnosis using metric = "Kappa"
+
+```{r svm_model_performance_kappa_by_diagnosis}
+
+SVM_cf_kappa <- tidy(confusionMatrix(testing_results_kappa$diagnosis,testing_results_kappa$SVM)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(SVM_cf_kappa, digits = 3, caption = "Support Vector Machine using metric = kappa")
+
+Orig_cf_kappa <- tidy(confusionMatrix(testing_results_kappa$diagnosis,testing_results_kappa$Orig)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(Orig_cf_kappa, digits = 3, caption = "Support Vector Machine without scaling and centering using metric = kappa")
+
+boxcox_cf_kappa <- tidy(confusionMatrix(testing_results_kappa$diagnosis,testing_results_kappa$BoxCox)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(boxcox_cf_kappa, digits = 3, caption = "Support Vector Machine with BoxCox transformation using metric = kappa")
+
+pca_cf_kappa <- tidy(confusionMatrix(testing_results_kappa$diagnosis,testing_results_kappa$PCA)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(pca_cf_kappa, digits = 3, caption = "Support Vector Machine with PCA using metric = kappa")
+
+both_cf_kappa <- tidy(confusionMatrix(testing_results_kappa$diagnosis,testing_results_kappa$Both)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(both_cf_kappa, digits = 3, caption = "Support Vector Machine with both PCA and BoxCox transformation using metric = kappa")
+
+svm_corr_cf_kappa <- tidy(confusionMatrix(testing_results_kappa$diagnosis,
+                                    testing_results_kappa$SVM_corr)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(svm_corr_cf_kappa, digits = 3, caption = "Support Vector Machine without correlation using metric = kappa")
+
+
+down_cf_kappa <- tidy(confusionMatrix(testing_results_kappa$diagnosis,testing_results_kappa$Down)) %>% 
+  select(term:estimate) %>% 
+  filter(term %in% c("specificity", "sensitivity", "f1",
+                     "prevalence","recall", "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(term = str_replace(string=term, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(term = str_replace(string=term, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(term = str_replace(string=term, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(class)
+
+kable(down_cf_kappa, digits = 3, caption = "Support Vector Machine with downsampling using metric = kappa")
+
+
+
+```
+
+
+##More model tuning
+
+The "random" hyperparameter search which is set bu the "tunelength" argument of
+the "train" function of the Caret package in R tests values for the "Cost" or
+"C" hyperparameter according to a sequence of $2^X$, eg. $2^2$,$2^3$ etc.
+However, values of "C" or "Cost" between eg. 4 and 8 or 16 and 24 are not tested
+when assessing model performance during training on the training dataset during
+cross-validation. By manually choosing values, it is possible to also test
+values for the "C" or "Cost" parameter such as 6 or 7.25, that may very well be
+better than 8 or 4. The same principle applies to the $\sigma$ hyperparameter,
+which is chosen according to the procedure explained above and is then kept
+constant during training. Thus, here I am doing a so-called "grid-search" to
+test multiple combinations of different values of C and sigma.
+
+###Tuning the best performing model
+
+Note: The code for the manual hyperparameter tuning for the "SVM with both
+BoxCox and PCA using Kappa metric" is not run when making this PDF, as the model
+without the highl correlated variable proved to have a better predictive
+performance overall.
+
+Hyperparameters of the best performing  model - "SVM with both BoxCox and PCA 
+using Kappa metric".
+
+```{r parameters, eval = FALSE}
+
+print(both_k)
+
+plot(both_k)
+
+```
+
+Manually selecting values adjacent to the Cost and Sigma values identified as 
+the optimal hyperparameters during the cross-validation and then training the 
+model on these manually selected values for Cost and Sigma.
+
+```{r more_tune, eval = FALSE}
+
+grid <- expand.grid(sigma = c(0.00735,0.0074, 0.0075, 0.0076, 0.00765, 0.007,0.00725, 
+                  0.0073, 0.006, 0.008, 0.0085, 0.007, 0.009, 0.01),
+ C = c(6.63,6.64,6.5,6.68, 6.66, 6.625,6.675,6.69, 6.7,6.725, 6.735, 6.74, 6.75,6.775, 6.8,6.825 ,7,7.25,7.5,7.75,8, 8.25, 8.5, 8,75,9,9.25, 9.75))
+
+
+set.seed(123)
+
+svm_both_grid <- train(rec_both , data = diagnosis_train, 
+                    method = "svmRadial",
+                    tuneGrid = grid,
+                    metric = "Kappa",
+                    tuneLength = 12,
+                    trControl = control)
+
+print(svm_both_grid)
+
+plot(svm_both_grid)
+
+
+```
+
+For the svm model with both PCA and BoxCox transformation:
+Kappa was used to select the optimal model using the largest value.
+The final values used for the model were sigma = 0.0075 and C = 6.64.
+
+###Predict expanded grid model for the best performing model overall
+
+```{r pred_tune, eval = FALSE}
+
+testing_results_grid <- diagnosis_test %>%
+        mutate("svm_grid" = predict(svm_both_grid, diagnosis_test))
+
+SVM_grid <- conf_mat(testing_results_grid, truth = diagnosis, estimate = svm_grid)
+
+autoplot(SVM_grid, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap SVM using Kappa metric manual hyperparameter tuning") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+SVM_grid <- (summary(SVM_grid)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(SVM_grid, digits = 3, caption = "SVM with manual hyperparameter tuning") 
+
+
+```
+
+###Tuning the second best performing model
+
+svm on clinical, demographic and cortical thickness data with filtering of
+highly correlated variables: Tuning parameter 'sigma' was held constant at a
+value of 0.01128046 Kappa was used to select the optimal model using the largest
+value. The final values used for the model were sigma = 0.01128046 and C = 8.
+
+
+
+```{r params}
+
+print(corr_k)
+
+plot(corr_k)
+
+```
+
+Manually selecting values adjacent to the Cost and Sigma values identified as 
+the optimal hyperparameters during the cross-validation for the second best
+performing model and then training the model on these manually selected 
+ values for Cost and Sigma.
+
+```{r more_tune_two}
+
+#The code below was used in the analysis, but due to time-saving measures,
+# this code was not run in the making of this document
+
+# grid_two <- expand.grid(sigma = c(0, 0.0075,0.0073,0.00725,0.00715, 0.007,
+# 0.0095, 0.008, 0.0085, 0.006, 0.0065, 0.007, 0.009, 0.01, 0.015,0.0175, 0.02,
+# 0.06,0.00675), C = c( seq(7.5,12, by = 0.1)))
+
+#This code was not used in the initial analysis, but for illustrative purposes
+#it is used for making this document.
+
+grid_two <- expand.grid(sigma = c(0.007),
+  C = c( 9))
+
+
+set.seed(123)
+
+svm_corr_grid <- train(rec_corr , data = diagnosis_train, 
+                    method = "svmRadial",
+                    tuneGrid = grid_two,
+                    metric = "Kappa",
+                    trControl = control)
+
+print(svm_corr_grid)
+
+
+
+```
+
+SVM model without highly correlated variables: Kappa was used to select the
+optimal model using the largest value. The final values used for the model were
+sigma = 0.007 and C = 9.
+
+###Predict expanded grid model for the second best performing model overall
+
+results of the manually tuned SVM model which underwent the filtering of highly 
+correlated variables.
+
+```{r pred_tune_two}
+
+testing_results_grid_two <- diagnosis_test %>%
+        mutate("svm_grid" = predict(svm_corr_grid, diagnosis_test))
+
+SVM_grid_two <- conf_mat(testing_results_grid_two, truth = diagnosis, estimate = svm_grid)
+
+autoplot(SVM_grid_two, type = "heatmap") +
+  ggtitle("Confusion matrix for the SVM model using both the cortical thicknesses\n and the clinical and the demographic data") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+SVM_grid_two <- (summary(SVM_grid_two)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(SVM_grid_two, digits = 3, caption = "SVM model using both the cortical thicknesses and clinical and demographic data") 
+
+```
+
+Statistics for the each diagnosis:
+
+```{r pred_tune_two_diagnosis}
+
+manual_tuning <- tidy(confusionMatrix(testing_results_grid_two$diagnosis,
+                                      testing_results_grid_two$svm_grid)) %>% 
+  select("Statistic" = term, "Diagnosis" = class, "Estimate" = estimate) %>% 
+  filter(Statistic %in% c("specificity", "sensitivity", "f1",
+                      "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(Statistic = str_replace(string=Statistic, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(Statistic = str_replace(string=Statistic, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(Statistic = str_replace(string=Statistic, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(Diagnosis)
+
+kable(manual_tuning, digits = 3, caption = "SVM manually tuned")
+
+
+```
+
+
+#SVM model based on QDEC results
+
+SVM model based on significant areas of cortical thinning in QDEC at p < 0.05 
+with monte carlo simulation for cluster-wise multiple comparisons correction.
+
+preparing data for the training
+
+```{r QDEC_model}
+
+sig <- data %>% 
+  select(-c(kimove_id, model))  %>% 
+  select(diagnosis:h_y, lh_superiorfrontal_thickness, 
+         rh_parsopercularis_thickness,rh_caudalmiddlefrontal_thickness,
+         rh_precentral_thickness, rh_precuneus_thickness,
+         lh_lateralorbitofrontal_thickness)
+
+set.seed(123)
+
+sig_split <- initial_split(sig, strata = "diagnosis", prop = .75)
+
+sig_train <- training(sig_split)
+sig_test <- testing(sig_split)
+
+rec_sig_orig <-recipe(diagnosis ~ ., data = sig_train) %>%
+step_dummy(all_nominal(), - all_outcomes())
+
+rec_sig_svm <-recipe(diagnosis ~ ., data = sig_train) %>%
+step_dummy(all_nominal(), - all_outcomes()) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric())
+
+rec_sig_down <-  recipe(diagnosis ~ ., data = sig_train) %>%
+step_dummy(all_nominal(), - all_outcomes()) %>% 
+step_center(all_numeric()) %>%
+step_scale(all_numeric()) %>%
+step_downsample(diagnosis)
+
+rec_sig_boxcox <-recipe(diagnosis ~ ., data = sig_train) %>%
+step_BoxCox(all_numeric()) %>%
+step_dummy(all_nominal(), - all_outcomes()) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric())
+
+```
+
+training models based on the QDEC results
+
+```{r QDEC_train, eval=FALSE}
+
+set.seed(123)
+
+svm_sig <- train(rec_sig_svm, data = sig_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+orig_sig <- train(rec_sig_orig, data = sig_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+down_sig <- train(rec_sig_down, data = sig_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+boxcox_sig <- train(rec_sig_boxcox, data = sig_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+
+
+```
+
+results of the model which was based on the QDEC output
+
+```{r QDEC_train_results, eval = FALSE}
+
+sig_results <- sig_test %>%
+        mutate("svm" = predict(svm_sig, sig_test)) %>% 
+        mutate("orig" = predict(orig_sig, sig_test)) %>%
+        mutate("down" = predict(down_sig, sig_test)) %>%
+        mutate("BoxCox" = predict(boxcox_sig, sig_test)) 
+
+
+sig_down <- conf_mat(sig_results, truth = diagnosis, estimate = down)
+
+autoplot(sig_down, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap downsampled qdec results+clinical data") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+sig_down <- (summary(sig_down)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(sig_down, digits = 3, caption = "downsampled qdec results+clinical data")
+
+sig_svm <- conf_mat(sig_results, truth = diagnosis, estimate = svm)
+
+autoplot(sig_svm, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap svm on qdec results+clinical data") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+sig_svm <- (summary(sig_svm)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(sig_svm, digits = 3, caption = "svm on qdec results+clinical data")
+
+sig_orig <- conf_mat(sig_results, truth = diagnosis, estimate = orig)
+
+autoplot(sig_orig, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap svm without centering and scaling on qdec results+clinical data") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+sig_orig <- (summary(sig_orig)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(sig_orig, digits = 3, caption = "svm without centering and scaling on qdec results+clinical data")
+
+sig_boxcox <- conf_mat(sig_results, truth = diagnosis, estimate = BoxCox)
+
+autoplot(sig_boxcox, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap BoxCox transformed qdec results+clinical data") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+sig_boxcox <- (summary(sig_boxcox)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(sig_boxcox, digits = 3, caption = "BoxCox transformed qdec results+clinical data")
+
+```
+
+
+The downsampled version and the Boxcox transformed model had the best performances,
+Particularly the downsampled is great at distinguishing PSP patients.
+
+Cost and Sigma for the models using the QDEC output and clinical and demographic
+data
+
+```{r QDEC_hyperparameters, eval=FALSE}
+
+print(svm_sig)
+
+print(orig_sig)
+
+print(boxcox_sig)
+
+print(down_sig)
+
+```
+
+svm with scaling and centering: Tuning parameter 'sigma' was held constant at a
+value of 0.1066213 Kappa was used to select the optimal model using the largest
+value. The final values used for the model were sigma = 0.1066213 and C = 2.
+
+svm without scaling and centering: Tuning parameter 'sigma' was held constant at
+a value of 0.1066213 Kappa was used to select the optimal model using the
+largest value. The final values used for the model were sigma = 0.1066213 and C
+= 2.
+
+BoxCox:Tuning parameter 'sigma' was held constant at a value of 0.09832538
+Kappa was used to select the optimal model using the largest value.
+The final values used for the model were sigma = 0.09832538 and C = 2.
+
+Downsampling: Tuning parameter 'sigma' was held constant at a value of 0.07398176
+Kappa was used to select the optimal model using the largest value.
+The final values used for the model were sigma = 0.07398176 and C = 2.
+
+##manual tuning models using qdec the results
+
+manual tuning of the hyperparameters in the model which only used regions with
+statistically significant cortical thinning in QDEC.
+
+```{r QDEC_tuning}
+
+# grid_sig <- expand.grid(sigma = c(seq(0.05,0.14, by = 0.001)),
+#   C = c(seq(1,3.6, by = 0.1)))
+
+grid_sig <- expand.grid(sigma = c(0.07),
+  C = c(3.2))
+
+
+set.seed(123)
+
+svm_sig_grid <- train(rec_sig_down , data = sig_train, 
+                    method = "svmRadial",
+                    tuneGrid = grid_sig,
+                    metric = "Kappa",
+                    trControl = control)
+
+
+print(svm_sig_grid)
+
+
+
+```
+
+
+SVM model on significant regions in QDEC with downsampling: Kappa was used to
+select the optimal model using the largest value. The final values used for the
+model were sigma = 0.07 and C = 3.2.
+
+results from the manual tuning on the model based on the qdec results
+
+```{r QDEC_final_result}
+
+results_sig <- sig_test %>%
+        mutate("down" = predict(svm_sig_grid, sig_test))
+
+SVM_sig_down <- conf_mat(results_sig, truth = diagnosis, estimate = down)
+
+autoplot(SVM_sig_down, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap QDEC significant regions") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+SVM_sig_down <- (summary(SVM_sig_down)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+
+kable(SVM_sig_down, digits = 3, caption = "SVM on QDEC regions+clinical data with downsampling")
+
+```
+
+
+manual tuning of the BoxCox transformed model based on the qdec results
+
+
+Note: not run during the making of this PDF file, as the model with
+downsampling was superior. the code below is just an example of what was done,
+with no output.
+ 
+
+```{r Box_qdec, eval = FALSE}
+
+grid_box <- expand.grid(sigma = c(0.125,0.1, 0.0975),
+  C = c(2.2,2.4,2.1))
+
+
+set.seed(123)
+
+svm_sig_box <- train(rec_sig_boxcox , data = sig_train, 
+                    method = "svmRadial",
+                    tuneGrid = grid_box,
+                    metric = "Kappa",
+                    trControl = control)
+
+
+print(svm_sig_box)
+
+```
+
+significant regions model with boxcox transformation: Kappa was used to select
+the optimal model using the largest value. The final values used for the model
+were sigma = 0.1 and C = 2.
+
+results from the BoxCox transformed model based on the QDEC output
+
+```{r results_box_qdec, eval = FALSE}
+
+results_box <- sig_test %>%
+        mutate("box" = predict(svm_sig_box, sig_test))
+
+sig_box <- conf_mat(results_box, truth = diagnosis, estimate = box)
+
+autoplot(sig_box, type = "heatmap") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+sig_box <- (summary(sig_box)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(sig_box, digits = 3)
+
+
+
+```
+
+
+#MRI only model 
+
+
+Note: The code regarding the "MRI data only model" is not run when making 
+this PDF document. As the conclusion states below, it this modeldid not perform
+well. 
+
+
+Splitting data and creating recipes for the svm models based only on mri data
+
+```{r MRI, eval = FALSE}
+
+mri <- data %>% 
+  select(-c(kimove_id, model)) %>% 
+  select(diagnosis, lh_bankssts_thickness:rh_meanthickness_thickness, 
+         -lh_meanthickness_thickness)
+
+set.seed(123)
+
+mr_split <- initial_split(mri, strata = "diagnosis", prop = .75)
+
+mr_train <- training(mr_split)
+mr_test <- testing(mr_split)
+
+rec_mr_both <-recipe(diagnosis ~ ., data = mr_train) %>%
+step_BoxCox(all_numeric()) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric()) %>%
+step_pca(all_numeric(), threshold = .99)
+
+rec_mr_corr <-recipe(diagnosis ~ ., data = mr_train) %>%
+step_corr(all_numeric(), threshold = .8) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric())
+
+
+rec_mr_down <-  recipe(diagnosis ~ ., data = mr_train) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric()) %>%
+step_downsample(diagnosis)
+
+rec_mr_corr_down <-  recipe(diagnosis ~ ., data = mr_train) %>%
+step_corr(all_numeric(), threshold = .8) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric()) %>%
+step_downsample(diagnosis)
+
+
+
+```
+
+training models based only on the cortical thicknesses
+
+```{r MRI_train, eval = FALSE}
+
+set.seed(123)
+
+mri_both <- train(rec_mr_both, data = mr_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+mri_corr <- train(rec_mr_corr, data = mr_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+mri_down <- train(rec_mr_down, data = mr_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+mri_corr_down <- train(rec_mr_corr_down, data = mr_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+```
+
+predicting models based on mri data only
+
+```{r MRI_results, eval = FALSE}
+
+mri_results <- mr_test %>%
+        mutate("both" = predict(mri_both, mr_test)) %>% 
+        mutate("corr" = predict(mri_corr, mr_test)) %>%
+        mutate("down" = predict(mri_down, mr_test)) %>%
+        mutate("corr_down" = predict(mri_corr_down, mr_test)) 
+
+mr_both <- conf_mat(mri_results, truth = diagnosis, estimate = both)
+
+autoplot(mr_both, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap mri data only with both boxcox transformation and pca") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+mr_both <- (summary(mr_both)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(mr_both, digits = 3, caption = "mri data only with both boxcox transformation and pca")
+
+mr_corr <- conf_mat(mri_results, truth = diagnosis, estimate = corr)
+
+autoplot(mr_corr, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap MRI data only without high correlations") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+mr_corr <- (summary(mr_corr)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(mr_corr, digits = 3, caption = "mri data only without highly correlated variables")
+
+mr_down <- conf_mat(mri_results, truth = diagnosis, estimate = down)
+
+autoplot(mr_down, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap SVM using mri only data with downsampling") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+mr_down <- (summary(mr_down)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(mr_down, digits = 3, caption = "mri data only With downsampling")
+
+mr_corr_down <- conf_mat(mri_results, truth = diagnosis, estimate = corr_down)
+
+autoplot(mr_corr_down, type = "heatmap") +
+  ggtitle("Diagnosis Heatmap MRI data only with downsampling and without correlations") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+mr_corr_down <- (summary(mr_corr_down)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(mr_corr_down, digits = 3, caption = "MRI data only without highly correlated variables and with downsampling")
+
+```
+
+##Conclusion from using MRI data only
+
+Using only the cortical thicknesses does not seem to predict the diagnoses well.
+The manual hyperparameter tuning was not attempted for the model based on the
+MRI data, as it was not considered to add any value due to the models initial 
+poor performance.
+
+#Model using solely clinical data
+
+Demographic and clinical data: age, gender, Hoehn and Yahr score, symptom 
+duration
+
+
+```{r clin_split}
+
+clin <- data %>% 
+  select(-c(kimove_id, model)) %>% 
+  select(diagnosis:h_y)
+
+set.seed(123)
+
+clin_split <- initial_split(clin, strata = "diagnosis", prop = .75)
+
+clin_train <- training(clin_split)
+clin_test <- testing(clin_split)
+
+rec_clin_svm <-recipe(diagnosis ~ ., data = clin_train) %>%
+step_dummy(all_nominal(), - all_outcomes()) %>%
+step_center(all_numeric()) %>%
+step_scale(all_numeric())
+
+rec_clin_down <-  recipe(diagnosis ~ ., data = clin_train) %>%
+step_dummy(all_nominal(), - all_outcomes()) %>% 
+step_center(all_numeric()) %>%
+step_scale(all_numeric()) %>%
+step_downsample(diagnosis)
+
+```
+
+training
+
+
+Note: the code in the chunk below was not run. The next chunk 
+includes the manual
+optimization of the model which onl uses clinical data, which is the final
+result for the model based on only the clinical and demographic data.
+
+
+```{r clin_training, eval = FALSE}
+
+set.seed(123)
+
+svm_clin <- train(rec_clin_svm, data = clin_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+set.seed(123)
+
+down_clin <- train(rec_clin_down, data = clin_train,
+method = "svmRadial",
+metric = "Kappa",
+tuneLength = 12,
+trControl = control)
+
+testing_clin <- clin_test %>%
+        mutate("svm" = predict(svm_clin, clin_test)) %>% 
+        mutate("down" = predict(down_clin, clin_test))
+
+SVM_clin <- conf_mat(testing_clin, truth = diagnosis, estimate = svm)
+
+autoplot(SVM_clin, type = "heatmap") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+SVM_clin <- (summary(SVM_clin)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(SVM_clin, digits = 3) 
+
+Down_clin <- conf_mat(testing_clin, truth = diagnosis, estimate = down)
+
+autoplot(Down_clin, type = "heatmap") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+Down_clin <- (summary(Down_clin)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+kable(Down_clin,digits = 3)
+
+
+```
+
+
+Svm only: Tuning parameter 'sigma' was held constant at a value of 0.3903809
+Kappa was used to select the optimal model using the largest value.
+The final values used for the model were sigma = 0.3903809 and C = 2.
+
+Downsampling: Tuning parameter 'sigma' was held constant at a value of 0.1754092
+Kappa was used to select the optimal model using the largest value.
+The final values used for the model were sigma = 0.196 and C = 3.
+
+
+manual selection of tuning parameters of the clinical data only
+
+```{r clin_tune}
+
+
+
+grid_two <- expand.grid(sigma = c(0.196),
+  C = c( 3))
+
+set.seed(123)
+
+svm_clin_grid <- train(rec_clin_down , data = clin_train, 
+                    method = "svmRadial",
+                    tuneGrid = grid_two,
+                    metric = "Kappa",
+                    tuneLength = 12, 
+                    trControl = control)
+
+print(svm_clin_grid)
+
+
+```
+
+test the model based on clinical and demographic data
+
+```{r clin_tune_results}
+
+testing_clin <- clin_test %>%
+        mutate("down" = predict(svm_clin_grid, clin_test))
+
+Down_clin <- conf_mat(testing_clin, truth = diagnosis, estimate = down)
+
+autoplot(Down_clin, type = "heatmap") +
+  ggtitle("Confusion matrix for the SVM model using only the clinical\n and the demographic data") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+Down_clin <- (summary(Down_clin)) %>% 
+  select("Metric" = .metric, "Estimate" = .estimate) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='f_meas', replacement='F-score')) %>% 
+ mutate(Metric = str_replace(string=Metric, pattern='j_index', replacement="Youden's index")) %>% 
+  mutate(Metric = str_replace(string=Metric, pattern='kap', 
+                              replacement="kappa")) %>% 
+  filter(Metric %in% c("specificity", "sensitivity", "F-score", 
+                       "Youden's index", "accuracy", "kappa", "precision",                              "recall"))
+
+
+kable(Down_clin, digits = 3, caption = "SVM on clinical data only with downsampling") 
+
+```
+
+results by diagnosis model, using clinical variables only.
+
+
+```{r clin_by_diagnosis}
+
+clinical <- tidy(confusionMatrix(testing_clin$diagnosis,
+                                      testing_clin$down)) %>% 
+  select("Statistic" = term, "Diagnosis" = class, "Estimate" = estimate) %>% 
+  filter(Statistic %in% c("specificity", "sensitivity", "f1",
+                      "pos_pred_value", 
+                     "neg_pred_value" )) %>%
+  mutate(Statistic = str_replace(string=Statistic, pattern='f1', 
+                            replacement='F-score')) %>% 
+  mutate(Statistic = str_replace(string=Statistic, pattern='pos_pred_value', 
+                            replacement='ppv')) %>%  
+  mutate(Statistic = str_replace(string=Statistic, pattern='neg_pred_value', 
+                            replacement='npv')) %>%  
+  arrange(Diagnosis)
+
+
+kable(clinical, digits = 3, caption = "SVM on clinical data only with downsampling") 
+  
+
+
+```
+
+
+#Summary
+
+The model with the best performance was SVM done on the whole data which first 
+underwent a filtering by correlation using a threshold of 0.8 for the Pearson
+Correlation Coefficient. It can be added that this threshold was used following 
+extensive examination of multiple threshold values.The data was then scaled and 
+centered. The model was initially run alongside multiple other models, 
+with the hyperparameters Cost and Sigma being tuned automatically during a 12-fold Cross-validation repeated 12 times. The model which had undergone this removal 
+of variables by correlation exhibited the second best performance among all
+models after testing on the testdataset. The best model at that time was the one 
+in which initially a Box-Cox transformation was done, and then the variables 
+were scaled, centered and runthrough a PCA and then the Principle Components 
+explaining 99% of the variancewere used in making that particular model. 
+
+The two best models from the initial testing were then used in yet another 
+training phase, but this time the hyperparameters were set manually based on 
+values that are located adjacent to the Cost and Sigma parameters that were 
+chosen during the Cross-validation. After continous trial and error, the 
+model that underwent removal of variables based on correlation emerged as the
+model which had the best performance. All columns from the original dataset, 
+except for "Kimove ID", were used in creating this model. Although we suspected 
+that e.g. the total intracranial volume or Hoehn and Yahr would not contribute 
+to the model, it was eventually showed that the model performed best when all
+the columns were used. 
+
+The parameters of the final model were as follows:
+sigma = 0.007 and C = 9. 
+
+A total of 16 variables were excluded from this model during pre-processing,
+based on which ones exhibited correlation coefficients greater than 0.8 in 
+relation to another variable in the dataset.
+
+#initial SVM results table
+
+##Collecting all model predictions into a single object
+
+```{r final}
+
+
+
+Orig_k$model <- as.vector(rep("Orig_k", nrow(Orig_k)))
+
+PCA_k$model <- as.vector(rep("PCA_k", nrow(Orig_k)))
+
+Down_k$model <- as.vector(rep("Down_k", nrow(Orig_k)))
+
+Both_k$model <- as.vector(rep("Both_k", nrow(Orig_k)))
+
+BOXCOX_k$model <- as.vector(rep("BOXCOX_k", nrow(Orig_k)))
+
+SVM_k$model <- as.vector(rep("SVM_k", nrow(Orig_k)))
+
+SVM_corr_k$model <- as.vector(rep("Corr_k", nrow(Orig_k)))
+
+Orig$model <- as.vector(rep("orig", nrow(Orig_k)))
+
+PCA$model <- as.vector(rep("pca", nrow(Orig_k)))
+
+Down$model <-  as.vector(rep("down", nrow(Orig_k)))
+
+Both$model <-  as.vector(rep("both", nrow(Orig_k)))
+
+BOXCOX$model <-  as.vector(rep("boxcox", nrow(Orig_k)))
+
+SVM$model <-  as.vector(rep("svm", nrow(Orig_k)))
+
+SVM_corr$model  <-  as.vector(rep("corr", nrow(Orig_k)))
+
+
+final <- bind_rows(Orig_k, BOXCOX_k, SVM_corr_k, SVM_k,  PCA_k, Both_k, Down_k, Down, SVM_corr, Orig,  SVM, BOXCOX, PCA, Both)
+
+
+```
+
+
+
+## Initial model training results table
+
+
+```{r final_table}
+
+options(knitr.kable.NA = '0')
+
+final %>%  
+  filter(Metric %in% c("F-score", "kappa", "Youden's index")) %>% 
+  mutate(model = str_replace(string=model, pattern='svm', replacement="SVM on centered and scaled data")) %>% 
+  mutate(model = str_replace(string=model, pattern='down', replacement="SVM on downsampled data"))%>% 
+ mutate(model = str_replace(string=model, pattern='corr', replacement="SVM on data without highly correlated variables"))%>% 
+ mutate(model = str_replace(string=model, pattern='boxcox', replacement="SVM on data with BoxCox transformation"))%>% 
+ mutate(model = str_replace(string=model, pattern='pca', replacement="SVM on principle components")) %>% 
+  mutate(model = str_replace(string=model, pattern='both', replacement="SVM on data with both boxcox and pca")) %>% 
+  mutate(model = str_replace(string=model, pattern='orig', replacement="SVM on unprocessed data")) %>% 
+    mutate(model = str_replace(string=model, pattern='cory', replacement='SVM without high correlation and on principle components using kappa metric')) %>% 
+ mutate(model = str_replace(string=model, pattern='Orig_k', replacement="SVM on unprocessed data using kappa metric")) %>% 
+ mutate(model = str_replace(string=model, pattern='BOXCOX_k', replacement="SVM on data with BoxCox transformation using metric kappa")) %>% 
+ mutate(model = str_replace(string=model, pattern='Corr_k', replacement="SVM on data without correlated variables using metric kappa"))%>% 
+ mutate(model = str_replace(string=model, pattern='PCA_k', replacement="SVM on principle components using kappa metric"))%>% 
+ mutate(model = str_replace(string=model, pattern='Both_k', replacement="SVM on boxcoxed and PCA data using kappa metric"))%>% 
+ mutate(model = str_replace(string=model, pattern='Down_k', replacement="SVM on downsampled data using kappa metric"))%>% 
+ mutate(model = str_replace(string=model, pattern='SVM_k', replacement="SVM on centered and scaled data using kappa metric ")) %>% 
+  kable(digits = 3, caption = "Model summary") 
+  
+
+
+```
+
+#Session info
+
+```{r session}
+
+sessioninfo::session_info()
+
+```
+
